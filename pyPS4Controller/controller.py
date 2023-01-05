@@ -202,6 +202,7 @@ class Controller(Actions):
         self.event_size = struct.calcsize(self.event_format)
         self.event_history = []
         self.on_sequence = []
+        self.special_inputs_indexes = [0] * len(self.on_sequence)
 
     def on_disconnect_callback(self):
         pass
@@ -243,7 +244,7 @@ class Controller(Actions):
             exit(1)
         return None
 
-    def process_event(self, event, special_inputs_indexes):
+    def process_event(self, event):
         if event:
             __event = struct.unpack(self.event_format, event)
             (overflow, value, button_type, button_id) = (__event[3:], __event[2], __event[1], __event[0])
@@ -254,10 +255,10 @@ class Controller(Actions):
             for i, special_input in enumerate(self.on_sequence):
                 sub = special_input["inputs"]
                 full = self.event_history
-                start_index = special_inputs_indexes[i]
+                start_index = self.special_inputs_indexes[i]
                 check =  [start for start in range(start_index, len(full) - len(sub) + 1) if sub == full[start:start + len(sub)]]
                 if len(check) != 0:
-                    special_inputs_indexes[i] = check[0] + 1
+                    self.special_inputs_indexes[i] = check[0] + 1
                     special_input["callback"]()
 
     def listen(self, timeout=30, on_connect=None, on_disconnect=None, on_sequence=[], on_timer_callback=None, timer=0.001):
@@ -280,24 +281,23 @@ class Controller(Actions):
         if on_connect is not None:
             self.on_disconnect_callback = on_disconnect
             
-
-        self.on_sequence = on_sequence
+        if on_sequence is not None:
+            self.on_sequence = on_sequence
+            self.special_inputs_indexes = [0] * len(on_sequence)
 
 
         self.wait_for_interface(timeout)
         try:
             self.open()
-            
-            special_inputs_indexes = [0] * len(on_sequence)
 
             event = self.poll_events(timer)
-            self.process_event(event, special_inputs_indexes)
+            self.process_event(event)
 
             last_time = time.time() 
             while not self.stop:
                 while(time.time() < last_time+timer):
                     event = self.poll_events(timer)
-                    self.process_event(event, special_inputs_indexes)
+                    self.process_event(event)
                 
                 self.on_timer()
                 if callable(on_timer_callback):
