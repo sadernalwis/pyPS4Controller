@@ -1,7 +1,8 @@
 import os
 import struct
 import time
-
+import select
+import time
 
 class Actions:
     """
@@ -11,6 +12,9 @@ class Actions:
     """
     def __init__(self):
         return
+
+    def on_timer(self):
+        print("timer triggered")
 
     def on_x_press(self):
         print("on_x_press")
@@ -197,8 +201,67 @@ class Controller(Actions):
 
         self.event_size = struct.calcsize(self.event_format)
         self.event_history = []
+        self.on_sequence = []
+        self.special_inputs_indexes = [0] * len(self.on_sequence)
 
-    def listen(self, timeout=30, on_connect=None, on_disconnect=None, on_sequence=None):
+    def on_disconnect_callback(self):
+        pass
+
+    def on_connect_callback(self):
+        pass
+
+    def open(self):
+        try:
+            self._file = open(self.interface, "rb")
+        except:
+            raise
+
+    def wait_for_interface(self, timeout=30):
+            print("Waiting for interface: {} to become available . . .".format(self.interface))
+            for i in range(timeout):
+                if os.path.exists(self.interface):
+                    print("Successfully bound to: {}.".format(self.interface))
+                    self.on_connect_callback()
+                    return
+                time.sleep(1)
+            print("Timeout({} sec). Interface not available.".format(timeout))
+            exit(1)
+
+    def poll_events(self,timer):
+        try:    
+            r, w, e = select.select([ self._file ], [], [], timer)
+            if self._file in r:
+                ret = self._file.read(self.event_size)
+                return ret
+            elif r==[] and w == [] and e == []:
+                #print("timeout in select")
+                pass
+            else:
+                raise Exception("Unexpected condition in select: r,w,e = ",r,w,e)
+        except IOError:
+            print("Interface lost. Device disconnected?")
+            self.on_disconnect_callback()
+            exit(1)
+        return None
+
+    def process_event(self, event):
+        if event:
+            __event = struct.unpack(self.event_format, event)
+            (overflow, value, button_type, button_id) = (__event[3:], __event[2], __event[1], __event[0])
+
+            if button_id not in self.black_listed_buttons:
+                self.__handle_event(button_id=button_id, button_type=button_type, value=value, overflow=overflow,
+                                    debug=self.debug)
+            for i, special_input in enumerate(self.on_sequence):
+                sub = special_input["inputs"]
+                full = self.event_history
+                start_index = self.special_inputs_indexes[i]
+                check =  [start for start in range(start_index, len(full) - len(sub) + 1) if sub == full[start:start + len(sub)]]
+                if len(check) != 0:
+                    self.special_inputs_indexes[i] = check[0] + 1
+                    special_input["callback"]()
+
+    def listen(self, timeout=30, on_connect=None, on_disconnect=None, on_sequence=[], on_timer_callback=None, timer=0.001):
         """
         Start listening for events on a given self.interface
         :param timeout: INT, seconds. How long you want to wait for the self.interface.
@@ -212,64 +275,39 @@ class Controller(Actions):
                                   "callback": () -> None)}]
         :return: None
         """
-        def on_disconnect_callback():
-            self.is_connected = False
-            if on_disconnect is not None:
-                on_disconnect()
+        if on_disconnect is not None:
+            self.on_disconnect_callback = on_disconnect
 
-        def on_connect_callback():
-            self.is_connected = True
-            if on_connect is not None:
-                on_connect()
+        if on_connect is not None:
+            self.on_disconnect_callback = on_disconnect
+            
+        if on_sequence is not None:
+            self.on_sequence = on_sequence
+            self.special_inputs_indexes = [0] * len(on_sequence)
 
-        def wait_for_interface():
-            print("Waiting for interface: {} to become available . . .".format(self.interface))
-            for i in range(timeout):
-                if os.path.exists(self.interface):
-                    print("Successfully bound to: {}.".format(self.interface))
-                    on_connect_callback()
-                    return
-                time.sleep(1)
-            print("Timeout({} sec). Interface not available.".format(timeout))
-            exit(1)
 
-        def read_events():
-            try:
-                return _file.read(self.event_size)
-            except IOError:
-                print("Interface lost. Device disconnected?")
-                on_disconnect_callback()
-                exit(1)
-
-        def check_for(sub, full, start_index):
-            return [start for start in range(start_index, len(full) - len(sub) + 1) if
-                    sub == full[start:start + len(sub)]]
-
-        def unpack():
-            __event = struct.unpack(self.event_format, event)
-            return (__event[3:], __event[2], __event[1], __event[0])
-
-        wait_for_interface()
+        self.wait_for_interface(timeout)
         try:
-            _file = open(self.interface, "rb")
-            event = read_events()
-            if on_sequence is None:
-                on_sequence = []
-            special_inputs_indexes = [0] * len(on_sequence)
-            while not self.stop and event:
-                (overflow, value, button_type, button_id) = unpack()
-                if button_id not in self.black_listed_buttons:
-                    self.__handle_event(button_id=button_id, button_type=button_type, value=value, overflow=overflow,
-                                        debug=self.debug)
-                for i, special_input in enumerate(on_sequence):
-                    check = check_for(special_input["inputs"], self.event_history, special_inputs_indexes[i])
-                    if len(check) != 0:
-                        special_inputs_indexes[i] = check[0] + 1
-                        special_input["callback"]()
-                event = read_events()
+            self.open()
+
+            event = self.poll_events(timer)
+            self.process_event(event)
+
+            last_time = time.time() 
+            while not self.stop:
+                while(time.time() < last_time+timer):
+                    event = self.poll_events(timer)
+                    self.process_event(event)
+                
+                self.on_timer()
+                if callable(on_timer_callback):
+                    on_timer_callback()
+
+                last_time = time.time() 
+
         except KeyboardInterrupt:
             print("\nExiting (Ctrl + C)")
-            on_disconnect_callback()
+            self.on_disconnect_callback()
             exit(1)
 
     def __handle_event(self, button_id, button_type, value, overflow, debug):
